@@ -82,6 +82,28 @@ jobs:
             exit 1
           fi
 
+      # The registry checks mcpName against npm's per-version endpoint, which
+      # answered 404 for several minutes after 0.1.1 was published (the first
+      # listing failed that way). Wait for npm to serve it, with the right
+      # mcpName, rather than race it.
+      - name: Wait for npm to serve this version
+        if: steps.registry.outputs.publish == 'true'
+        run: |
+          id=$(node -p "require('./package.json').name")
+          version=$(node -p "require('./package.json').version")
+          want=$(node -p "require('./server.json').name")
+          for attempt in $(seq 1 40); do
+            got=$(curl -fsS "https://registry.npmjs.org/$id/$version" 2>/dev/null | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{console.log(JSON.parse(s).mcpName??'')}catch{console.log('')}})")
+            if [ "$got" = "$want" ]; then
+              echo "npm serves $id@$version with mcpName $got."
+              exit 0
+            fi
+            echo "npm does not serve $id@$version with mcpName $want yet (attempt $attempt); waiting 30s."
+            sleep 30
+          done
+          echo "::error::npm still does not serve $id@$version with mcpName $want after 20 minutes."
+          exit 1
+
       # Pinned, and checked against the release's published checksum.
       - name: Install mcp-publisher
         if: steps.registry.outputs.publish == 'true'
