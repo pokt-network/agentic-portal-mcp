@@ -7,9 +7,9 @@ name: Publish to npm
 # Built and tested here before publishing, with npm provenance: the package
 # page links the published tarball to this repository and this run.
 #
-# Auth: the NPM_TOKEN secret for the first release. Once npm Trusted
-# Publishing is configured for this repository and workflow, delete the
-# secret: npm then authenticates this workflow through OIDC (id-token below).
+# Auth: npm Trusted Publishing. npm trusts this repository's publish.yml and
+# authenticates it through OIDC (id-token below); no npm token is stored
+# anywhere, and the package refuses token publishes.
 
 on:
   push:
@@ -57,5 +57,3 @@ jobs:
         run: npm test
       - if: steps.check.outputs.publish == 'true'
         run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
