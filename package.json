@@ -1,0 +1,59 @@
+{
+  "name": "@pocket-network/agentic-portal-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for the Pocket Network agentic marketplace: search paid data services and call them, paying per request in USDC with x402. Holds your key locally, with spend limits checked before anything is signed.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pokt-network/agentic-portal-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/pokt-network/agentic-portal-mcp/issues"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "bin": {
+    "agentic-portal-mcp": "bundle/bin.js"
+  },
+  "files": [
+    "bundle",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "x402",
+    "pocket-network",
+    "agentic",
+    "usdc",
+    "base"
+  ],
+  "homepage": "https://agent.pocket.network",
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "bundle": "node scripts/bundle.mjs",
+    "prepack": "node scripts/bundle.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.1.0",
+    "@x402/core": "2.26.0",
+    "@x402/evm": "2.26.0",
+    "pino": "^9.6.0",
+    "viem": "^2.48.11",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "2.1.0",
+    "@types/node": "^24.13.6",
+    "esbuild": "0.24.2",
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.8"
+  }
+}
