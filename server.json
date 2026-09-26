@@ -3,7 +3,7 @@
   "name": "network.pocket/agentic-portal-mcp",
   "title": "Pocket Network Agentic Marketplace",
   "description": "Search and call pay-per-request data services, paying in USDC on Base with x402.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "websiteUrl": "https://agent.pocket.network",
   "repository": {
     "url": "https://github.com/pokt-network/agentic-portal-mcp",
@@ -13,7 +13,7 @@
     {
       "registryType": "npm",
       "identifier": "@pocket-network/agentic-portal-mcp",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "transport": {
         "type": "stdio"
       },
@@ -56,6 +56,12 @@
           "default": "false"
         }
       ]
+    }
+  ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://agent.pocket.network/mcp"
     }
   ]
 }

@@ -22,7 +22,7 @@ import {
 } from './tools.js';
 
 export const SERVER_NAME = 'pocket-agentic-portal';
-export const SERVER_VERSION = '0.1.1';
+export const SERVER_VERSION = '0.1.2';
 
 /** Logs go to stderr. On stdio, stdout is the protocol. */
 export function stderrLogger(): Logger {

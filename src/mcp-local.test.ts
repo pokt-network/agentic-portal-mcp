@@ -529,4 +529,10 @@ describe('release metadata', () => {
     expect(server.packages[0].version).toBe(pkg.version);
     expect(SERVER_VERSION).toBe(pkg.version);
   });
+
+  it('lists the hosted endpoint beside the npm package', () => {
+    expect(server.remotes).toEqual([
+      { type: 'streamable-http', url: 'https://agent.pocket.network/mcp' },
+    ]);
+  });
 });
