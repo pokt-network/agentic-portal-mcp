@@ -1,15 +1,21 @@
-name: Publish to npm
+name: Publish to npm and the MCP Registry
 
-# Publishes the version in package.json when npm does not have it yet, so
-# raising the version is the whole release step. Runs on every push to main
-# (each mirror update) and on demand; a version already on npm is skipped.
+# Publishes the version in package.json when npm does not have it yet, then
+# lists that version in the official MCP Registry (server.json) when the
+# registry does not have it yet, so raising the version is the whole release
+# step. Runs on every push to main (each mirror update) and on demand; a
+# version already published is skipped at each step.
 #
 # Built and tested here before publishing, with npm provenance: the package
 # page links the published tarball to this repository and this run.
 #
-# Auth: npm Trusted Publishing. npm trusts this repository's publish.yml and
+# npm auth: Trusted Publishing. npm trusts this repository's publish.yml and
 # authenticates it through OIDC (id-token below); no npm token is stored
 # anywhere, and the package refuses token publishes.
+#
+# Registry auth: DNS. The registry trusts network.pocket/* because the
+# pocket.network apex carries a TXT record with the public half of the
+# MCP_DNS_PRIVATE_KEY secret.
 
 on:
   push:
@@ -57,3 +63,41 @@ jobs:
         run: npm test
       - if: steps.check.outputs.publish == 'true'
         run: npm publish --provenance --access public
+
+      - name: Is this version already in the MCP Registry?
+        id: registry
+        run: |
+          name=$(node -p "require('./server.json').name")
+          version=$(node -p "require('./server.json').version")
+          path=$(node -p "encodeURIComponent(require('./server.json').name)")
+          code=$(curl -s -o /dev/null -w '%{http_code}' "https://registry.modelcontextprotocol.io/v0.1/servers/$path/versions/$version")
+          if [ "$code" = 200 ]; then
+            echo "$name $version is already in the MCP Registry; nothing to list."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          elif [ "$code" = 404 ]; then
+            echo "Listing $name $version in the MCP Registry."
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::The MCP Registry answered $code for $name $version; not guessing whether it is listed."
+            exit 1
+          fi
+
+      # Pinned, and checked against the release's published checksum.
+      - name: Install mcp-publisher
+        if: steps.registry.outputs.publish == 'true'
+        run: |
+          curl -fsSL -o mcp-publisher.tar.gz https://github.com/modelcontextprotocol/registry/releases/download/v1.8.1/mcp-publisher_linux_amd64.tar.gz
+          echo "a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc  mcp-publisher.tar.gz" | sha256sum -c -
+          tar xzf mcp-publisher.tar.gz mcp-publisher
+
+      - name: List it in the MCP Registry
+        if: steps.registry.outputs.publish == 'true'
+        env:
+          MCP_DNS_PRIVATE_KEY: ${{ secrets.MCP_DNS_PRIVATE_KEY }}
+        run: |
+          if [ -z "$MCP_DNS_PRIVATE_KEY" ]; then
+            echo "::error::MCP_DNS_PRIVATE_KEY is not set, so the registry listing cannot be published."
+            exit 1
+          fi
+          ./mcp-publisher login dns --domain pocket.network --private-key "$MCP_DNS_PRIVATE_KEY"
+          ./mcp-publisher publish

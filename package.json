@@ -1,6 +1,7 @@
 {
   "name": "@pocket-network/agentic-portal-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
+  "mcpName": "network.pocket/agentic-portal-mcp",
   "description": "MCP server for the Pocket Network agentic marketplace: search paid data services and call them, paying per request in USDC with x402. Holds your key locally, with spend limits checked before anything is signed.",
   "license": "MIT",
   "repository": {

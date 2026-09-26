@@ -7,6 +7,9 @@
  * service was contacted at all. A payment is signed for real in the happy
  * path, with a throwaway key, against a fake seller.
  */
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
 import pino from 'pino';
@@ -15,7 +18,7 @@ import { describe, expect, it } from 'vitest';
 import { Budget, BudgetExhausted } from './budget.js';
 import { priceAtomic, type ServiceEntry } from './catalogue.js';
 import { checkRoute } from './routes.js';
-import { createDeps, createServer } from './server.js';
+import { createDeps, createServer, SERVER_VERSION } from './server.js';
 import { readSettings } from './settings.js';
 import { callService, describeService, searchServices, type ToolResult } from './tools.js';
 
@@ -505,5 +508,25 @@ describe('the MCP server', () => {
     const { client } = await connect();
     const result = await client.callTool({ name: 'call_service', arguments: { ...LITERATURE } });
     expect((result.structuredContent as Record<string, any>).response).toEqual(ENVELOPE);
+  });
+});
+
+// ── release metadata ─────────────────────────────────────────────────────────
+
+describe('release metadata', () => {
+  const read = (file: string) =>
+    JSON.parse(readFileSync(fileURLToPath(new URL(`../${file}`, import.meta.url)), 'utf8'));
+  const pkg = read('package.json');
+  const server = read('server.json');
+
+  // The MCP Registry refuses a listing whose name is not the npm package's
+  // mcpName, and one whose npm version does not exist; the server reports
+  // SERVER_VERSION to every client. A release bumps all of them together.
+  it('names and versions agree across package.json, server.json and the server', () => {
+    expect(server.name).toBe(pkg.mcpName);
+    expect(server.packages[0].identifier).toBe(pkg.name);
+    expect(server.version).toBe(pkg.version);
+    expect(server.packages[0].version).toBe(pkg.version);
+    expect(SERVER_VERSION).toBe(pkg.version);
   });
 });

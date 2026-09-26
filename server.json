@@ -1,0 +1,61 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "network.pocket/agentic-portal-mcp",
+  "title": "Pocket Network Agentic Marketplace",
+  "description": "Search and call pay-per-request data services, paying in USDC on Base with x402.",
+  "version": "0.1.1",
+  "websiteUrl": "https://agent.pocket.network",
+  "repository": {
+    "url": "https://github.com/pokt-network/agentic-portal-mcp",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@pocket-network/agentic-portal-mcp",
+      "version": "0.1.1",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "POCKET_PRIVATE_KEY",
+          "description": "Key of the paying wallet (64 hex characters). Without it only the free tools work. Use a wallet made for this.",
+          "isRequired": false,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "POCKET_MAX_TOTAL_ATOMIC",
+          "description": "Most the server will sign for in total while it runs, in atomic units (USDC: 1000000 = $1.00). Required to pay.",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        },
+        {
+          "name": "POCKET_MAX_PER_CALL_ATOMIC",
+          "description": "Most it will sign for one call, in atomic units. Default: the highest price in the catalogue.",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        },
+        {
+          "name": "POCKET_NETWORK",
+          "description": "The only network it signs on (CAIP-2).",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string",
+          "default": "eip155:8453"
+        },
+        {
+          "name": "POCKET_QUOTE_ONLY",
+          "description": "true: return the seller terms and never pay.",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "boolean",
+          "default": "false"
+        }
+      ]
+    }
+  ]
+}
