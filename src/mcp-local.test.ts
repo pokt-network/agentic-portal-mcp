@@ -93,7 +93,20 @@ interface Seen {
  * retry — the envelope and a receipt. `price` is what the 402 quotes, which
  * can differ from the catalogue: the signer must trust the 402, not the list.
  */
-function fakePortal(options: { price?: string; paidStatus?: number; receipt?: boolean } = {}) {
+function fakePortal(
+  options: {
+    price?: string;
+    paidStatus?: number;
+    paidBody?: unknown;
+    receipt?: boolean;
+    /** Answer the unpaid request with this instead of a 402. */
+    unpaid?: { status: number; body: unknown };
+    /** Every request fails as fetch fails when nothing answers. */
+    unreachable?: boolean;
+    /** The catalogue request fails. */
+    noCatalogue?: boolean;
+  } = {},
+) {
   const seen: Seen[] = [];
   const price = options.price ?? '5000';
   const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -103,7 +116,12 @@ function fakePortal(options: { price?: string; paidStatus?: number; receipt?: bo
     seen.push({ url, signed, body: typeof init?.body === 'string' ? init.body : undefined });
 
     if (url === `${PORTAL}/services.json`) {
+      if (options.noCatalogue === true) return new Response('down', { status: 503 });
       return Response.json({ count: CATALOGUE.length, services: CATALOGUE });
+    }
+    if (options.unreachable === true) throw new TypeError('fetch failed');
+    if (!signed && options.unpaid !== undefined) {
+      return Response.json(options.unpaid.body, { status: options.unpaid.status });
     }
     if (!signed) {
       const terms = {
@@ -137,7 +155,7 @@ function fakePortal(options: { price?: string; paidStatus?: number; receipt?: bo
         payer: '0xpayer',
       }),
     ).toString('base64');
-    return new Response(JSON.stringify(ENVELOPE), {
+    return new Response(JSON.stringify(options.paidBody ?? ENVELOPE), {
       status: options.paidStatus ?? 200,
       headers: {
         'content-type': 'application/json',
@@ -171,6 +189,23 @@ const LITERATURE = {
 } as const;
 
 const payload = (result: ToolResult) => result.structuredContent as Record<string, any>;
+
+/**
+ * The refusal, checked for the contract every refusal keeps (#2): an error
+ * result whose `error` is `{ code, message, retryable }`, the same in
+ * `structuredContent` and in the text, which is all some clients read.
+ */
+function refusal(result: ToolResult): { code: string; message: string; retryable: boolean } {
+  expect(result.isError).toBe(true);
+  const error = payload(result).error;
+  expect(Object.keys(error).sort()).toEqual(['code', 'message', 'retryable']);
+  expect(typeof error.code).toBe('string');
+  expect(typeof error.message).toBe('string');
+  expect(typeof error.retryable).toBe('boolean');
+  const text = (result.content as Array<{ type: string; text: string }>)[0]!.text;
+  expect(JSON.parse(text)).toEqual(result.structuredContent);
+  return error;
+}
 
 // ── settings ─────────────────────────────────────────────────────────────────
 
@@ -314,45 +349,56 @@ describe('search_services and describe_service', () => {
 describe('call_service refuses before the service is contacted', () => {
   it('an unknown service', async () => {
     const { deps, portal } = setup();
-    const result = await callService(deps, { serviceId: 'nope' });
-    expect(result.isError).toBe(true);
+    const error = refusal(await callService(deps, { serviceId: 'nope' }));
+    expect(error).toMatchObject({ code: 'SERVICE_UNKNOWN', retryable: false });
+    expect(error.message).toContain('Nothing was signed');
     expect(portal.serviceCalls()).toHaveLength(0);
   });
 
   it('a service that is not serving', async () => {
     const { deps, portal } = setup();
-    expect(
-      (await callService(deps, { serviceId: 'resting', path: '/v1/x', body: {} })).isError,
-    ).toBe(true);
+    const result = await callService(deps, { serviceId: 'resting', path: '/v1/x', body: {} });
+    expect(refusal(result)).toMatchObject({ code: 'SERVICE_UNAVAILABLE', retryable: true });
     expect(portal.serviceCalls()).toHaveLength(0);
   });
 
   it('an operation the service does not list', async () => {
     const { deps, portal } = setup();
     const result = await callService(deps, { ...LITERATURE, path: '/v1/nope' });
-    expect(result.isError).toBe(true);
+    expect(refusal(result)).toMatchObject({ code: 'REQUEST_UNSUPPORTED', retryable: false });
     expect(payload(result).listedOperations).toContain('POST /v1/literature');
     expect(portal.serviceCalls()).toHaveLength(0);
   });
 
   it('no wallet', async () => {
     const { deps, portal } = setup({ POCKET_PRIVATE_KEY: '' });
-    const result = await callService(deps, LITERATURE);
-    expect(payload(result).error).toContain('POCKET_PRIVATE_KEY');
+    const error = refusal(await callService(deps, LITERATURE));
+    expect(error).toMatchObject({ code: 'WALLET_NOT_CONFIGURED', retryable: false });
+    expect(error.message).toContain('POCKET_PRIVATE_KEY');
     expect(portal.serviceCalls()).toHaveLength(0);
   });
 
   it('no session total — nothing is signed without one', async () => {
     const { deps, portal } = setup({ POCKET_MAX_TOTAL_ATOMIC: '' });
-    const result = await callService(deps, LITERATURE);
-    expect(payload(result).error).toContain('POCKET_MAX_TOTAL_ATOMIC');
+    const error = refusal(await callService(deps, LITERATURE));
+    expect(error).toMatchObject({ code: 'SPEND_LIMIT_NOT_SET', retryable: false });
+    expect(error.message).toContain('POCKET_MAX_TOTAL_ATOMIC');
     expect(portal.serviceCalls()).toHaveLength(0);
   });
 
   it('a setting that could not be read', async () => {
     const { deps, portal } = setup({ POCKET_MAX_PER_CALL_ATOMIC: 'lots' });
     const result = await callService(deps, LITERATURE);
+    expect(refusal(result)).toMatchObject({ code: 'SETTINGS_INVALID', retryable: false });
     expect(payload(result).problems).toHaveLength(1);
+    expect(portal.serviceCalls()).toHaveLength(0);
+  });
+
+  it('a catalogue that could not be read', async () => {
+    const { deps, portal } = setup({}, fakePortal({ noCatalogue: true }));
+    const error = refusal(await callService(deps, LITERATURE));
+    expect(error).toMatchObject({ code: 'CATALOGUE_UNAVAILABLE', retryable: true });
+    expect(error.message).toContain('Nothing was signed');
     expect(portal.serviceCalls()).toHaveLength(0);
   });
 
@@ -361,8 +407,9 @@ describe('call_service refuses before the service is contacted', () => {
     expect((await callService(deps, LITERATURE)).isError).toBeUndefined();
     expect((await callService(deps, LITERATURE)).isError).toBeUndefined();
     const before = portal.serviceCalls().length;
-    const third = await callService(deps, LITERATURE);
-    expect(payload(third).error).toContain('spend limit');
+    const error = refusal(await callService(deps, LITERATURE));
+    expect(error).toMatchObject({ code: 'BUDGET_EXHAUSTED', retryable: false });
+    expect(error.message).toContain('spend limit');
     expect(portal.serviceCalls()).toHaveLength(before);
   });
 });
@@ -370,8 +417,9 @@ describe('call_service refuses before the service is contacted', () => {
 describe('call_service refuses before signing', () => {
   it('a quote above the per-call ceiling', async () => {
     const { deps, portal } = setup({ POCKET_MAX_PER_CALL_ATOMIC: '4999' });
-    const result = await callService(deps, LITERATURE);
-    expect(payload(result).error).toContain('Nothing was signed');
+    const error = refusal(await callService(deps, LITERATURE));
+    expect(error).toMatchObject({ code: 'PRICE_ABOVE_LIMIT', retryable: false });
+    expect(error.message).toContain('Nothing was signed');
     expect(portal.signedCalls()).toHaveLength(0);
     expect(deps.budget!.spent).toBe(0n);
     expect(deps.budget!.remaining).toBe(100000n);
@@ -379,16 +427,65 @@ describe('call_service refuses before signing', () => {
 
   it('a quote above what is left of the session total', async () => {
     const { deps, portal } = setup({ POCKET_MAX_TOTAL_ATOMIC: '4999' });
-    const result = await callService(deps, LITERATURE);
-    expect(payload(result).error).toContain('Nothing was signed');
+    const error = refusal(await callService(deps, LITERATURE));
+    expect(error).toMatchObject({ code: 'PRICE_ABOVE_LIMIT', retryable: false });
+    expect(error.message).toContain('Nothing was signed');
     expect(portal.signedCalls()).toHaveLength(0);
     expect(deps.budget!.remaining).toBe(4999n);
   });
 
   it('a 402 quoting more than the catalogue lists (the default ceiling is the catalogue price)', async () => {
     const { deps, portal } = setup({}, fakePortal({ price: '5001' }));
-    expect((await callService(deps, LITERATURE)).isError).toBe(true);
+    expect(refusal(await callService(deps, LITERATURE)).code).toBe('PRICE_ABOVE_LIMIT');
     expect(portal.signedCalls()).toHaveLength(0);
+  });
+
+  it("passes the portal's own code through, with its retryable", async () => {
+    const portalError = {
+      error: { code: 'SERVICE_UNAVAILABLE', message: 'Not offered now.', retryable: true },
+    };
+    const { deps, portal } = setup({}, fakePortal({ unpaid: { status: 503, body: portalError } }));
+    const result = await callService(deps, LITERATURE);
+    const error = refusal(result);
+    expect(error).toMatchObject({ code: 'SERVICE_UNAVAILABLE', retryable: true });
+    expect(error.message).toContain('Nothing was signed');
+    // The portal's own answer stays beside it, unchanged.
+    expect(payload(result).detail.body).toEqual(portalError);
+    expect(portal.signedCalls()).toHaveLength(0);
+  });
+
+  it('a seller answer with no code is UNEXPECTED_RESPONSE', async () => {
+    const { deps } = setup({}, fakePortal({ unpaid: { status: 500, body: 'oops' } }));
+    expect(refusal(await callService(deps, LITERATURE))).toMatchObject({
+      code: 'UNEXPECTED_RESPONSE',
+      retryable: false,
+    });
+  });
+
+  it('a portal that cannot be reached is PORTAL_UNREACHABLE, and retryable', async () => {
+    const { deps, portal } = setup({}, fakePortal({ unreachable: true }));
+    const error = refusal(await callService(deps, LITERATURE));
+    expect(error).toMatchObject({ code: 'PORTAL_UNREACHABLE', retryable: true });
+    expect(error.message).toContain('Nothing was signed');
+    expect(portal.signedCalls()).toHaveLength(0);
+  });
+
+  it('quote-only refusals are coded the same way', async () => {
+    const portalError = {
+      error: { code: 'SERVICE_UNKNOWN', message: 'No such service.', retryable: false },
+    };
+    const { deps } = setup(
+      { POCKET_QUOTE_ONLY: 'true', POCKET_PRIVATE_KEY: '' },
+      fakePortal({ unpaid: { status: 404, body: portalError } }),
+    );
+    expect(refusal(await callService(deps, LITERATURE))).toMatchObject({
+      code: 'SERVICE_UNKNOWN',
+      retryable: false,
+    });
+    // And the one the issue reported, unknown to the catalogue itself.
+    expect(refusal(await callService(deps, { serviceId: 'no-such-v1' })).code).toBe(
+      'SERVICE_UNKNOWN',
+    );
   });
 
   it('two calls at once cannot both fit under one remaining total', async () => {
@@ -444,10 +541,22 @@ describe('call_service pays', () => {
   it('counts a payment signed before a failure, and says it may have been charged', async () => {
     const { deps } = setup({}, fakePortal({ paidStatus: 502 }));
     const result = await callService(deps, LITERATURE);
-    expect(result.isError).toBe(true);
+    expect(refusal(result)).toMatchObject({ code: 'UNEXPECTED_RESPONSE', retryable: false });
     expect(payload(result).paymentSigned).toBe(true);
     expect(deps.budget!.spent).toBe(5000n);
     expect(deps.budget!.remaining).toBe(95000n);
+  });
+
+  it('after signing, a retryable portal code is NOT retryable: a retry signs again', async () => {
+    const portalError = {
+      error: { code: 'UPSTREAM_TIMEOUT', message: 'The service took too long.', retryable: true },
+    };
+    const { deps } = setup({}, fakePortal({ paidStatus: 504, paidBody: portalError }));
+    const result = await callService(deps, LITERATURE);
+    const error = refusal(result);
+    expect(error).toMatchObject({ code: 'UPSTREAM_TIMEOUT', retryable: false });
+    expect(error.message).toContain('A payment WAS signed');
+    expect(payload(result).paymentSigned).toBe(true);
   });
 
   it('quote-only returns the seller terms and signs nothing', async () => {
@@ -498,10 +607,47 @@ describe('the MCP server', () => {
       name: 'call_service',
       arguments: { path: '/v1/literature' },
     });
-    expect(result.isError).toBe(true);
     // Refused by the schema, not later as an unknown service: the catalogue was never read.
-    expect(JSON.stringify(result.content)).toContain("required property 'serviceId'");
+    const error = refusal(result as ToolResult);
+    expect(error).toMatchObject({ code: 'INVALID_ARGUMENTS', retryable: false });
+    expect(error.message).toContain("required property 'serviceId'");
+    expect(error.message).toContain('Nothing was signed');
     expect(portal.seen).toHaveLength(0);
+  });
+
+  it('codes every kind of bad argument, on every tool', async () => {
+    const { client, portal } = await connect();
+    const bad = [
+      { name: 'search_services', arguments: { limit: 0 } },
+      { name: 'search_services', arguments: { extra: true } },
+      { name: 'describe_service', arguments: {} },
+      { name: 'describe_service', arguments: { serviceId: 7 } },
+      { name: 'call_service', arguments: { serviceId: 'eth', httpMethod: 'DELETE' } },
+      { name: 'call_service', arguments: { serviceId: 'eth', body: 'not an object' } },
+    ];
+    for (const call of bad) {
+      const error = refusal((await client.callTool(call)) as ToolResult);
+      expect(error.code).toBe('INVALID_ARGUMENTS');
+      expect(error.message).toContain(`Invalid arguments for tool ${call.name}`);
+    }
+    expect(portal.seen).toHaveLength(0);
+  });
+
+  it('still advertises the real input schema', async () => {
+    const { client } = await connect();
+    const { tools } = await client.listTools();
+    const call = tools.find((t) => t.name === 'call_service')!;
+    expect(call.inputSchema.required).toEqual(['serviceId']);
+    expect(call.inputSchema.additionalProperties).toBe(false);
+  });
+
+  it('refuses through the protocol with the same coded shape', async () => {
+    const { client } = await connect();
+    const result = await client.callTool({
+      name: 'call_service',
+      arguments: { serviceId: 'nope' },
+    });
+    expect(refusal(result as ToolResult).code).toBe('SERVICE_UNKNOWN');
   });
 
   it('pays through the protocol end to end', async () => {

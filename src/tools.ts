@@ -7,9 +7,30 @@
  * Every refusal before signing says so in words ("Nothing was signed."). A
  * failure after signing says the opposite, because from then on the user may
  * have paid and the model should not retry blindly.
+ *
+ * ## Errors
+ *
+ * Every refusal is `{ error: { code, message, retryable } }`, the portal's own
+ * shape, so an agent branches on `code` here as it does against the portal
+ * and the hosted `/mcp` (pokt-network/agentic-portal-mcp#2). The codes are:
+ *
+ * - the portal's, where the condition is the same one (`SERVICE_UNKNOWN`,
+ *   `SERVICE_UNAVAILABLE`, `REQUEST_UNSUPPORTED`), and passed through
+ *   unchanged when the portal itself refused;
+ * - this server's own, for what only it has: its settings, wallet and spend
+ *   limit, and its view of the portal (`LOCAL_ERROR_CODES`).
+ *
+ * After a payment was signed, `retryable` is always false, whatever the portal
+ * said: a retry signs a second payment.
  */
 import type { CallToolResult } from '@modelcontextprotocol/server';
-import { AgentError, payForRequest, requestQuote, type Quote } from './buyer/index.js';
+import {
+  AgentError,
+  type AgentErrorKind,
+  payForRequest,
+  requestQuote,
+  type Quote,
+} from './buyer/index.js';
 import type { Logger } from 'pino';
 
 import { Budget, BudgetExhausted } from './budget.js';
@@ -19,6 +40,7 @@ import {
   priceAtomic,
   type ServiceEntry,
 } from './catalogue.js';
+import type { Checked } from './input.js';
 import { checkRoute } from './routes.js';
 import type { Settings } from './settings.js';
 
@@ -43,15 +65,65 @@ const ok = (value: Record<string, unknown>): ToolResult => ({
   structuredContent: value,
 });
 
-const refuse = (message: string, detail: Record<string, unknown> = {}): ToolResult => ({
-  content: [{ type: 'text', text: JSON.stringify({ error: message, ...detail }, null, 2) }],
-  structuredContent: { error: message, ...detail },
-  isError: true,
-});
+/** The codes only this server produces. Listed in the agent integration guide. */
+export const LOCAL_ERROR_CODES = [
+  'INVALID_ARGUMENTS',
+  'CATALOGUE_UNAVAILABLE',
+  'SETTINGS_INVALID',
+  'WALLET_NOT_CONFIGURED',
+  'SPEND_LIMIT_NOT_SET',
+  'BUDGET_EXHAUSTED',
+  'PRICE_ABOVE_LIMIT',
+  'TERMS_INVALID',
+  'NETWORK_NOT_OFFERED',
+  'UNEXPECTED_RESPONSE',
+  'PORTAL_TIMEOUT',
+  'PORTAL_UNREACHABLE',
+] as const;
+
+/** The portal's codes this server produces itself, for the same condition. */
+type SharedCode = 'SERVICE_UNKNOWN' | 'SERVICE_UNAVAILABLE' | 'REQUEST_UNSUPPORTED';
+
+export type ErrorCode = (typeof LOCAL_ERROR_CODES)[number] | SharedCode;
+
+/**
+ * `code` is one this server chose, or (as a plain string) one the portal
+ * answered with, passed through: the portal's set is the portal's to extend.
+ */
+const refuse = (
+  code: ErrorCode | (string & {}),
+  message: string,
+  retryable: boolean,
+  detail: Record<string, unknown> = {},
+): ToolResult => {
+  const value = { error: { code, message, retryable }, ...detail };
+  return {
+    content: [{ type: 'text', text: JSON.stringify(value, null, 2) }],
+    structuredContent: value,
+    isError: true,
+  };
+};
+
+/** Run `run` on arguments that passed the tool's input schema, or refuse. */
+export async function withArgs<T>(
+  tool: string,
+  checked: Promise<Checked<T>>,
+  run: (args: T) => Promise<ToolResult>,
+): Promise<ToolResult> {
+  const result = await checked;
+  if (result.ok) return run(result.value);
+  return refuse(
+    'INVALID_ARGUMENTS',
+    `Invalid arguments for tool ${tool}: ${result.message}. Nothing was signed.`,
+    false,
+  );
+}
 
 function unknownService(serviceId: string): ToolResult {
   return refuse(
+    'SERVICE_UNKNOWN',
     `There is no service "${serviceId}". Use search_services to find one. Nothing was signed.`,
+    false,
   );
 }
 
@@ -59,8 +131,9 @@ async function guarded(run: () => Promise<ToolResult>): Promise<ToolResult> {
   try {
     return await run();
   } catch (thrown) {
+    // The catalogue is fetched again on the next call, so this may pass then.
     if (thrown instanceof CatalogueUnavailable)
-      return refuse(`${thrown.message}. Nothing was signed.`);
+      return refuse('CATALOGUE_UNAVAILABLE', `${thrown.message}. Nothing was signed.`, true);
     throw thrown;
   }
 }
@@ -134,7 +207,11 @@ export function callService(deps: Deps, args: CallArgs): Promise<ToolResult> {
     const entry = await deps.catalogue.find(args.serviceId);
     if (entry === undefined) return unknownService(args.serviceId);
     if (entry.serving === false) {
-      return refuse(`${entry.serviceId} is not serving right now. Nothing was signed.`);
+      return refuse(
+        'SERVICE_UNAVAILABLE',
+        `${entry.serviceId} is not serving right now. Nothing was signed.`,
+        true,
+      );
     }
 
     // 2. The request, against what the service lists.
@@ -142,7 +219,7 @@ export function callService(deps: Deps, args: CallArgs): Promise<ToolResult> {
     const body = httpMethod === 'GET' ? undefined : withJsonRpcEnvelope(args.body, args.path);
     const route = checkRoute(entry.methods, { httpMethod, path: args.path, body });
     if (!route.ok) {
-      return refuse(`${route.reason} Nothing was signed.`, {
+      return refuse('REQUEST_UNSUPPORTED', `${route.reason} Nothing was signed.`, false, {
         listedOperations: route.listed,
         hint: 'describe_service shows every operation and a real captured example.',
       });
@@ -150,15 +227,20 @@ export function callService(deps: Deps, args: CallArgs): Promise<ToolResult> {
 
     // 3. The configuration. Every problem is reported, none guessed around.
     if (settings.problems.length > 0) {
-      return refuse(`The server's settings need fixing. Nothing was signed.`, {
-        problems: settings.problems,
-      });
+      return refuse(
+        'SETTINGS_INVALID',
+        `The server's settings need fixing. Nothing was signed.`,
+        false,
+        { problems: settings.problems },
+      );
     }
     const perCall = settings.maxPerCallAtomic ?? (await highestPrice(deps));
     if (perCall === undefined) {
       return refuse(
+        'SETTINGS_INVALID',
         `No service in the catalogue is priced on ${settings.network}, so there is no default per-call limit. ` +
           'Set POCKET_MAX_PER_CALL_ATOMIC or POCKET_NETWORK. Nothing was signed.',
+        false,
       );
     }
     const quoteConfig = {
@@ -193,16 +275,20 @@ export function callService(deps: Deps, args: CallArgs): Promise<ToolResult> {
 
     if (settings.privateKey === undefined) {
       return refuse(
+        'WALLET_NOT_CONFIGURED',
         'No wallet is configured, so this server cannot pay. Set POCKET_PRIVATE_KEY (and ' +
           'POCKET_MAX_TOTAL_ATOMIC) in the env block of this MCP server in your client config. ' +
           'Nothing was signed.',
+        false,
       );
     }
     if (deps.budget === undefined) {
       return refuse(
+        'SPEND_LIMIT_NOT_SET',
         'No spend limit is set, and this server will not sign without one. Set ' +
           'POCKET_MAX_TOTAL_ATOMIC (atomic units for the session; USDC has 6 decimals, so ' +
           '1000000 is $1.00) in the env block of this MCP server. Nothing was signed.',
+        false,
       );
     }
 
@@ -211,7 +297,9 @@ export function callService(deps: Deps, args: CallArgs): Promise<ToolResult> {
     try {
       reservation = deps.budget.reserve(perCall);
     } catch (thrown) {
-      if (thrown instanceof BudgetExhausted) return refuse(thrown.message);
+      if (thrown instanceof BudgetExhausted) {
+        return refuse('BUDGET_EXHAUSTED', thrown.message, false);
+      }
       throw thrown;
     }
     let signed: Quote | undefined;
@@ -283,20 +371,48 @@ async function highestPrice(deps: Deps): Promise<bigint | undefined> {
   return highest;
 }
 
+const CODE_OF_KIND: Readonly<Record<AgentErrorKind, readonly [ErrorCode, boolean]>> = {
+  'terms-invalid': ['TERMS_INVALID', false],
+  'network-not-offered': ['NETWORK_NOT_OFFERED', false],
+  'price-above-limit': ['PRICE_ABOVE_LIMIT', false],
+  'unexpected-status': ['UNEXPECTED_RESPONSE', false],
+  timeout: ['PORTAL_TIMEOUT', true],
+};
+
+/** The portal's own `{ error: { code, retryable } }`, when its answer carried one. */
+function portalCode(body: unknown): readonly [string, boolean] | undefined {
+  if (typeof body !== 'object' || body === null) return undefined;
+  const error: unknown = (body as { error?: unknown }).error;
+  if (typeof error !== 'object' || error === null) return undefined;
+  const { code, retryable } = error as { code?: unknown; retryable?: unknown };
+  return typeof code === 'string' && code !== '' ? [code, retryable === true] : undefined;
+}
+
+/** The portal's code when it gave one, else this server's for what happened. */
+function codeOf(thrown: unknown): readonly [string, boolean] {
+  // Not the buyer's own error: the request never got an answer (DNS, refused).
+  if (!(thrown instanceof AgentError)) return ['PORTAL_UNREACHABLE', true];
+  return portalCode(thrown.detail.body) ?? CODE_OF_KIND[thrown.kind];
+}
+
 function failure(thrown: unknown, afterSigning: boolean): ToolResult {
   const message = thrown instanceof Error ? thrown.message : String(thrown);
   const detail = thrown instanceof AgentError ? thrown.detail : {};
+  const [code, retryable] = codeOf(thrown);
   if (!afterSigning) {
     return refuse(
+      code,
       message.includes('Nothing was signed') ? message : `${message} Nothing was signed.`,
-      {
-        detail,
-      },
+      retryable,
+      { detail },
     );
   }
+  // Never retryable once signed, whatever the portal said: a retry signs again.
   return refuse(
+    code,
     `${message} A payment WAS signed for this call, so it may have been charged. Do not retry ` +
       'without checking with the user.',
+    false,
     { detail, paymentSigned: true },
   );
 }

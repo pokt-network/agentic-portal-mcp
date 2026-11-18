@@ -17,6 +17,7 @@ export {
   payForRequest,
   requestQuote,
   AgentError,
+  type AgentErrorKind,
   type PaidRequestResult,
   type PayForRequestInput,
   type Quote,

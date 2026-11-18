@@ -62,12 +62,28 @@ export interface PaidRequestResult {
   readonly payerAddress: string;
 }
 
+/**
+ * What went wrong, as a stable value a caller can branch on. The message is
+ * for people; this is for code (the MCP server maps it to an error code).
+ *
+ * - `terms-invalid`: the seller's 402 could not be signed against.
+ * - `network-not-offered`: valid terms, none on the configured network.
+ * - `price-above-limit`: the quote is above the ceiling this agent signs for.
+ * - `unexpected-status`: the seller answered something other than what the
+ *   step expected; `detail.body` carries its answer.
+ * - `timeout`: no answer within the configured time.
+ */
+export type AgentErrorKind =
+  'terms-invalid' | 'network-not-offered' | 'price-above-limit' | 'unexpected-status' | 'timeout';
+
 export class AgentError extends Error {
+  readonly kind: AgentErrorKind;
   readonly detail: Record<string, unknown>;
 
-  constructor(message: string, detail: Record<string, unknown> = {}) {
+  constructor(kind: AgentErrorKind, message: string, detail: Record<string, unknown> = {}) {
     super(message);
     this.name = 'AgentError';
+    this.kind = kind;
     this.detail = detail;
   }
 }
@@ -113,6 +129,7 @@ export async function payForRequest(input: PayForRequestInput): Promise<PaidRequ
   } catch (thrown) {
     if (thrown instanceof AgentError) throw thrown;
     throw new AgentError(
+      'terms-invalid',
       `The reference client could not build a payment: ${thrown instanceof Error ? thrown.message : String(thrown)}. Nothing was signed.`,
       { accepts: paymentRequired.accepts },
     );
@@ -143,10 +160,14 @@ export async function payForRequest(input: PayForRequestInput): Promise<PaidRequ
   );
 
   if (paid.status !== 200) {
-    throw new AgentError(`Payment was presented and the seller answered ${paid.status}.`, {
-      status: paid.status,
-      body: paid.body,
-    });
+    throw new AgentError(
+      'unexpected-status',
+      `Payment was presented and the seller answered ${paid.status}.`,
+      {
+        status: paid.status,
+        body: paid.body,
+      },
+    );
   }
 
   // ── 5. Receipt. Its ABSENCE is meaningful, not an error. ───────────────────
@@ -219,6 +240,7 @@ async function fetchTerms(
 
   if (unpaid.status !== 402) {
     throw new AgentError(
+      'unexpected-status',
       `Expected 402 with payment requirements, got ${unpaid.status}. Nothing was signed.`,
       { status: unpaid.status, body: unpaid.body },
     );
@@ -236,6 +258,7 @@ async function fetchTerms(
     decoded = http.getPaymentRequiredResponse((name) => unpaid.headers.get(name), unpaid.body);
   } catch (thrown) {
     throw new AgentError(
+      'terms-invalid',
       "The seller's 402 is not valid x402 v2 — the reference client rejected it. " +
         'Nothing was signed.',
       { reason: thrown instanceof Error ? thrown.message : String(thrown), body: unpaid.body },
@@ -253,6 +276,7 @@ async function fetchTerms(
   const parsed = PaymentRequiredSchema.safeParse(decoded);
   if (!parsed.success) {
     throw new AgentError(
+      'terms-invalid',
       "The seller's 402 is not valid x402 v2 — it fails the reference schema. " +
         'Nothing was signed.',
       { issues: parsed.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`) },
@@ -328,12 +352,14 @@ function selectOption(
   );
   if (candidate === undefined) {
     throw new AgentError(
+      'network-not-offered',
       `The seller offers no \`exact\` option on ${config.network}. Nothing was signed.`,
       { offered: options.map((o) => `${o.scheme} on ${o.network}`) },
     );
   }
   if (BigInt(candidate.amount) > BigInt(config.maxAmountAtomic)) {
     throw new AgentError(
+      'price-above-limit',
       `Quoted ${candidate.amount} atomic units, above the ${config.maxAmountAtomic} ` +
         'ceiling this agent will sign for. Nothing was signed.',
       { quoted: candidate.amount, ceiling: config.maxAmountAtomic },
@@ -386,7 +412,7 @@ async function send(
     return { status: response.status, body: parsed, headers: response.headers };
   } catch (thrown) {
     if (thrown instanceof Error && thrown.name === 'AbortError') {
-      throw new AgentError(`No answer within ${timeoutMs}ms.`, { url });
+      throw new AgentError('timeout', `No answer within ${timeoutMs}ms.`, { url });
     }
     throw thrown;
   } finally {
