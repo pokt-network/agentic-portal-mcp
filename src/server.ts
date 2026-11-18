@@ -24,15 +24,32 @@ import {
   withArgs,
 } from './tools.js';
 
+/**
+ * Above the catalogue's size, so a listing can hold all of it: at 100 a model
+ * listing the catalogue never saw the last 20 of 120 services
+ * (pokt-network/agentic-portal-mcp#1).
+ */
+export const SEARCH_LIMIT_MAX = 500;
+
 const SEARCH_INPUT = toolInput<SearchArgs>({
   type: 'object',
   properties: {
-    query: { type: 'string', description: 'Words to match in the id, name and description.' },
+    query: {
+      type: 'string',
+      description:
+        'What you need, in plain words. Every service matching any of them is returned, best ' +
+        'match first, with the words it matched. Omit to list the catalogue.',
+    },
     category: {
       type: 'string',
       description: 'Exact category, e.g. research. The result lists them all.',
     },
-    limit: { type: 'integer', minimum: 1, maximum: 100, description: 'Default 20.' },
+    limit: {
+      type: 'integer',
+      minimum: 1,
+      maximum: SEARCH_LIMIT_MAX,
+      description: `Default 20, at most ${SEARCH_LIMIT_MAX}. \`total\` says how many there are.`,
+    },
   },
   additionalProperties: false,
 });
@@ -61,7 +78,7 @@ const CALL_INPUT = toolInput<CallArgs>({
 });
 
 export const SERVER_NAME = 'pocket-agentic-portal';
-export const SERVER_VERSION = '0.1.3';
+export const SERVER_VERSION = '0.1.4';
 
 /** Logs go to stderr. On stdio, stdout is the protocol. */
 export function stderrLogger(): Logger {
@@ -111,8 +128,9 @@ export function createServer(deps: Deps): McpServer {
       title: 'Search Pocket Network services',
       description:
         'Search the Pocket Network agentic marketplace: pay-per-request data services and utilities ' +
-        '(blockchain data, research, web, finance and more). Free. Returns ids, one-line descriptions ' +
-        'and prices; call describe_service before calling one.',
+        '(blockchain data, research, web, finance and more). Free. Describe what you need in plain ' +
+        'words: results are ranked best first. Returns ids, one-line descriptions and prices; call ' +
+        'describe_service before calling one.',
       inputSchema: SEARCH_INPUT.schema,
       annotations: { readOnlyHint: true, openWorldHint: true },
     },

@@ -42,6 +42,7 @@ import {
 } from './catalogue.js';
 import type { Checked } from './input.js';
 import { checkRoute } from './routes.js';
+import { rank, words } from './search.js';
 import type { Settings } from './settings.js';
 
 /** The SDK's own result type, so a result is checked against the wire shape. */
@@ -146,29 +147,46 @@ export interface SearchArgs {
   readonly limit?: number | undefined;
 }
 
+/** No query: the catalogue, in its order. A query: ranked, best first (`search.ts`). */
 export function searchServices(deps: Deps, args: SearchArgs): Promise<ToolResult> {
   return guarded(async () => {
     const entries = await deps.catalogue.all();
-    const terms = (args.query ?? '').toLowerCase().split(/\s+/).filter(Boolean);
-    const hits = entries
-      .filter((e) => args.category === undefined || e.category === args.category)
-      .filter((e) => {
-        const text = `${e.serviceId} ${e.displayName} ${e.description}`.toLowerCase();
-        return terms.every((term) => text.includes(term));
-      })
-      .slice(0, args.limit ?? 20)
-      .map((e) => ({
-        serviceId: e.serviceId,
-        name: e.displayName,
-        description: firstSentence(e.description),
-        category: e.category ?? null,
-        priceUsd: e.priceUsd,
-        serving: e.serving ?? null,
-      }));
+    const inCategory = entries.filter(
+      (e) => args.category === undefined || e.category === args.category,
+    );
+    const limit = args.limit ?? 20;
     const categories = [...new Set(entries.map((e) => e.category).filter(Boolean))].sort();
-    return ok({ count: hits.length, services: hits, categories });
+    const card = (e: ServiceEntry) => ({
+      serviceId: e.serviceId,
+      name: e.displayName,
+      description: firstSentence(e.description),
+      category: e.category ?? null,
+      priceUsd: e.priceUsd,
+      serving: e.serving ?? null,
+    });
+
+    if (words(args.query ?? '').length === 0) {
+      const services = inCategory.slice(0, limit).map(card);
+      return ok({ count: services.length, total: inCategory.length, services, categories });
+    }
+    const ranked = rank(inCategory, args.query ?? '');
+    const services = ranked
+      .slice(0, limit)
+      .map((r) => ({ ...card(r.entry), matchedTerms: r.matchedTerms }));
+    return ok({
+      count: services.length,
+      total: ranked.length,
+      services,
+      categories,
+      ...(ranked.length === 0 ? { hint: NO_MATCH_HINT } : {}),
+    });
   });
 }
+
+/** Shared with the hosted server, word for word: an empty result is not "no such service". */
+export const NO_MATCH_HINT =
+  'No service matches these words. Try other words for what you need, or list one of the ' +
+  'categories: call search_services with that category and no query.';
 
 function firstSentence(text: string): string {
   const end = text.search(/\.(\s|$)/);

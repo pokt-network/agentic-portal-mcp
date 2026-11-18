@@ -19,8 +19,15 @@ import { Budget, BudgetExhausted } from './budget.js';
 import { priceAtomic, type ServiceEntry } from './catalogue.js';
 import { checkRoute } from './routes.js';
 import { createDeps, createServer, SERVER_VERSION } from './server.js';
+import { rank, stem, words } from './search.js';
 import { readSettings } from './settings.js';
-import { callService, describeService, searchServices, type ToolResult } from './tools.js';
+import {
+  callService,
+  describeService,
+  NO_MATCH_HINT,
+  searchServices,
+  type ToolResult,
+} from './tools.js';
 
 const KEY_HEX = '11'.repeat(32);
 const KEY = `0x${KEY_HEX}`;
@@ -322,15 +329,174 @@ describe('priceAtomic', () => {
 
 // ── the free tools ───────────────────────────────────────────────────────────
 
+/**
+ * A catalogue shaped like the real one: every description ends in the same
+ * listing boilerplate, as the live ones do. pokt-network/agentic-portal-mcp#1.
+ */
+const BOILERPLATE = ' Pay per request in USDC; no account, no API key.';
+const SEARCHABLE = [
+  [
+    'literature-search',
+    'Academic Literature Search',
+    'research',
+    'Search scholarly literature via OpenAlex: works with metadata and abstracts.',
+  ],
+  [
+    'kr-apt-trades-v1',
+    'KR Apartment Trades',
+    'finance',
+    'What apartments in a Korean district sold for: each sale with price in KRW and area.',
+  ],
+  [
+    'gas-price-oracle',
+    'Gas Price Oracle',
+    'blockchain',
+    'Current gas price estimates for EVM chains.',
+  ],
+  [
+    'sanctions-watchlist-screen',
+    'Sanctions and Watchlist Screening',
+    'compliance',
+    'Screen a name against OFAC and other lists.',
+  ],
+  ['eth', 'Ethereum', 'blockchain', 'Ethereum JSON-RPC.'],
+  ['akash', 'Akash', 'blockchain', 'Akash REST.'],
+].map(([serviceId, displayName, category, description]) => ({
+  serviceId: serviceId!,
+  displayName: displayName!,
+  category,
+  description: `${description}${BOILERPLATE}`,
+}));
+const ids = (ranked: ReturnType<typeof rank>) => ranked.map((r) => r.entry.serviceId);
+
+describe('ranked search', () => {
+  it("finds the issue's examples: words the old every-word substring match missed", () => {
+    expect(ids(rank(SEARCHABLE, 'scholarly papers'))).toEqual(['literature-search']);
+    const apartments = rank(SEARCHABLE, 'korean apartment prices');
+    expect(ids(apartments)[0]).toBe('kr-apt-trades-v1');
+    expect(apartments[0]!.matchedTerms).toEqual(['korean', 'apartment', 'prices']);
+    expect(ids(rank(SEARCHABLE, 'apartment prices'))[0]).toBe('kr-apt-trades-v1');
+  });
+
+  it('returns every service matching any word, best first', () => {
+    // "prices" alone also matches the gas oracle, below the full match.
+    expect(ids(rank(SEARCHABLE, 'apartment prices'))).toEqual([
+      'kr-apt-trades-v1',
+      'gas-price-oracle',
+    ]);
+  });
+
+  it('weighs a match in the id or name above one in the description', () => {
+    // "price" is in both; only the oracle has it in its name.
+    expect(ids(rank(SEARCHABLE, 'price'))).toEqual(['gas-price-oracle', 'kr-apt-trades-v1']);
+  });
+
+  it('gives no weight to words in more than half the catalogue, like the shared boilerplate', () => {
+    expect(rank(SEARCHABLE, 'pay per request in usdc')).toEqual([]);
+    expect(rank(SEARCHABLE, 'no api key')).toEqual([]);
+    // Mixed in, the boilerplate neither adds a match nor appears among the matched words.
+    const screen = rank(SEARCHABLE, 'screen a name, pay per request');
+    expect(ids(screen)[0]).toBe('sanctions-watchlist-screen');
+    expect(screen[0]!.matchedTerms).not.toContain('pay');
+    expect(screen[0]!.matchedTerms).not.toContain('request');
+  });
+
+  it('gives no weight to a word in most, but not all, of the catalogue', () => {
+    // "data" is in two of three: it would still weigh ln(3/2) without the floor.
+    const three = [
+      { serviceId: 'a', displayName: 'A', description: 'Market data feed.' },
+      { serviceId: 'b', displayName: 'B', description: 'Weather data feed.' },
+      { serviceId: 'c', displayName: 'C', description: 'Scholarly works.' },
+    ];
+    expect(rank(three, 'data')).toEqual([]);
+    const mixed = rank(three, 'weather data');
+    expect(ids(mixed)).toEqual(['b']);
+    expect(mixed[0]!.matchedTerms).toEqual(['weather']);
+  });
+
+  it('keeps a word in exactly half the catalogue', () => {
+    const two = SEARCHABLE.slice(0, 2);
+    expect(ids(rank(two, 'scholarly'))).toEqual(['literature-search']);
+  });
+
+  it('matches a longer word a query word starts, from four letters', () => {
+    expect(ids(rank(SEARCHABLE, 'korea'))).toEqual(['kr-apt-trades-v1']);
+    expect(ids(rank(SEARCHABLE, 'sanction'))).toEqual(['sanctions-watchlist-screen']);
+    // Three letters is a whole word only: "eth" is not every word starting "eth".
+    expect(ids(rank(SEARCHABLE, 'eth'))).toEqual(['eth']);
+  });
+
+  it('keeps catalogue order between equal scores, and ranks nothing for no words', () => {
+    expect(ids(rank(SEARCHABLE, 'blockchain'))).toEqual(['gas-price-oracle', 'eth', 'akash']);
+    expect(rank(SEARCHABLE, '  ,; ')).toEqual([]);
+    expect(rank([], 'anything')).toEqual([]);
+  });
+
+  it('stems plurals and -ing, and leaves words that only look plural', () => {
+    expect(['prices', 'screening', 'policies', 'boxes', 'matches'].map(stem)).toEqual([
+      'price',
+      'screen',
+      'policy',
+      'box',
+      'match',
+    ]);
+    expect(['status', 'address', 'analysis', 'gas', 'sing'].map(stem)).toEqual([
+      'status',
+      'address',
+      'analysis',
+      'gas',
+      'sing',
+    ]);
+    expect(words('KR-Apt trades_v1, JSON-RPC!')).toEqual([
+      'kr',
+      'apt',
+      'trades',
+      'v1',
+      'json',
+      'rpc',
+    ]);
+  });
+});
+
 describe('search_services and describe_service', () => {
-  it('search matches every word and reports the categories', async () => {
+  it('ranks a query, says what matched, and reports the categories', async () => {
     const { deps } = setup();
-    const result = payload(await searchServices(deps, { query: 'scholarly openalex' }));
+    const result = payload(await searchServices(deps, { query: 'scholarly papers' }));
     expect(result.services.map((s: { serviceId: string }) => s.serviceId)).toEqual([
       'literature-search',
     ]);
     expect(result.services[0].description).toBe('Search scholarly literature via OpenAlex.');
+    expect(result.services[0].matchedTerms).toEqual(['scholarly']);
+    expect(result).toMatchObject({ count: 1, total: 1 });
+    expect(result.hint).toBeUndefined();
     expect(result.categories).toEqual(['blockchain', 'research']);
+  });
+
+  it('says why when nothing matches, instead of an empty list that reads as "no such service"', async () => {
+    const { deps } = setup();
+    const result = payload(await searchServices(deps, { query: 'weather forecast' }));
+    expect(result).toMatchObject({ count: 0, total: 0, services: [], hint: NO_MATCH_HINT });
+    expect(result.categories).toEqual(['blockchain', 'research']);
+  });
+
+  it('lists the catalogue in order with no query, and limits it, with the total', async () => {
+    const { deps } = setup();
+    const all = payload(await searchServices(deps, {}));
+    expect(all.services.map((s: { serviceId: string }) => s.serviceId)).toEqual(
+      CATALOGUE.map((e) => e.serviceId),
+    );
+    expect(all.services[0].matchedTerms).toBeUndefined();
+    expect(payload(await searchServices(deps, { limit: 2 }))).toMatchObject({ count: 2, total: 4 });
+    expect(payload(await searchServices(deps, { category: 'blockchain' }))).toMatchObject({
+      count: 2,
+      total: 2,
+    });
+  });
+
+  it('ranks within a category only', async () => {
+    const { deps } = setup();
+    const result = payload(await searchServices(deps, { query: 'search', category: 'blockchain' }));
+    expect(result.services).toEqual([]);
   });
 
   it('describe passes the catalogue entry through whole', async () => {
@@ -631,6 +797,14 @@ describe('the MCP server', () => {
       expect(error.message).toContain(`Invalid arguments for tool ${call.name}`);
     }
     expect(portal.seen).toHaveLength(0);
+  });
+
+  it('lets a listing hold more than 100 services, up to the stated maximum', async () => {
+    const { client } = await connect();
+    const big = await client.callTool({ name: 'search_services', arguments: { limit: 500 } });
+    expect(big.isError).toBeFalsy();
+    const over = await client.callTool({ name: 'search_services', arguments: { limit: 501 } });
+    expect(refusal(over as ToolResult).code).toBe('INVALID_ARGUMENTS');
   });
 
   it('still advertises the real input schema', async () => {
